@@ -1,12 +1,13 @@
 from dataclasses import dataclass, field
 
 import chemicals as chem
-from numpy import var
+import numpy as np
 import pandas as pd
 import math
 
 
 def calc_mol_weight(composition: dict[str, float]) -> float:
+    """Calculates molecular weight of a mixed stream using the composition as a dictionary"""
 
     MW = 0
 
@@ -18,12 +19,10 @@ def calc_mol_weight(composition: dict[str, float]) -> float:
 
 def ideal_gas_solver(P: float = None, T: float = None, V_bar: float = None) -> float:
     """
-    Determine the missing parameter var_to_solve of the ideal gas equation from the other 2 given values
-
-    T: float, temperature in K
-    P: float, pressure in Pa
-    V_bar: float, specific volume in m³/mol
-
+    Calculates the value of the missing parameter of the ideal gas equation from the other 2 given values\n
+    T, temperature in K\n
+    P, pressure in Pa\n
+    V_bar, specific volume in m³/mol
     """
     R = 8.314  # J/mol.K
     if P == None:
@@ -42,13 +41,14 @@ def ideal_gas_solver(P: float = None, T: float = None, V_bar: float = None) -> f
         raise Exception("you didnt specify P, T or V_bar, provide 2")
 
 
-def antoine_equation(component: str, P_vap: float = None, T: float = None) -> float:
+def antoine_equation(comp: str, P_vap: float = None, T: float = None) -> float:
     """
-    Determine the vapour pressure or temperature from the antoine equation using base 10 for the exponential and logarithm
-    P_vap: float, vapour pressure in Pa
-    T: float, temperature in K
+    Determine the vapour pressure or temperature from the antoine equation using base 10 for the exponential and logarithm\n
+    comp, component
+    P_vap, vapour pressure in Pa\n
+    T, temperature in K
     """
-    cas = chem.CAS_from_any(component)
+    cas = chem.CAS_from_any(comp)
 
     ant_data = chem.vapor_pressure.Psat_data_AntoinePoling.loc[cas]
     A = ant_data["A"]
@@ -58,78 +58,100 @@ def antoine_equation(component: str, P_vap: float = None, T: float = None) -> fl
     if P_vap == None:
         if T < ant_data["Tmin"] or T > ant_data["Tmax"]:
             print(
-                f"Warning: out of T correlation range for component {component} {ant_data['Tmin']} < T < {ant_data['Tmax']}"
+                f"Warning: out of T correlation range for component {comp} {ant_data['Tmin']} < T < {ant_data['Tmax']}"
             )
         return 10 ** (A - B / (T + C))
     elif T == None:
         T = -(C + B / (math.log(P_vap, 10) - A))
         if T < ant_data["Tmin"] or T > ant_data["Tmax"]:
             print(
-                f"Warning: out of T correlation range for component {component} {ant_data['Tmin']} < T < {ant_data['Tmax']}"
+                f"Warning: out of T correlation range for component {comp} {ant_data['Tmin']} < T < {ant_data['Tmax']}"
             )
         return T
     else:
         raise Exception("You didnt specifiy T or P_vap")
 
 
-def gen_K_values(P: float, T: float, components: list[str]) -> dict[str, float]:
-    """Determines the K_values of the components at given pressure and temperature, only Raoult's law at the moment"""
+def gen_K_values(P: float, T: float, comps: dict[str, float]) -> dict[str, float]:
+    """
+    Determines the K_values of the components at given pressure and temperature, only Raoult's law at the moment\n
+    P, total pressure in Pa\n
+    T, temperature in K
+    """
+
     result = {}
     K_value = None
-    for component in components:
-        P_vap = antoine_equation(T=T)
+    for component in comps.keys():
+        P_vap = antoine_equation(comp=component, T=T)
         result[component] = P_vap / P
     return result
 
 
-def rachford_function(zs: list[float], ks: list[float], V_F: float) -> float:
+def RR_equation(zs: list[float], Ks: list[float], V_frac: float) -> float:
+    """
+    Evaluates the Rachford Rice equation
+    zs, overall mole fractions
+    Ks, vapour liquid equilibrium constants
+    V_Frac, vapour fraction
+    """
     sum = 0
     for i, z in enumerate(zs):
-        sum += (z * (ks[i] - 1)) / (1 + V_F * (ks[i] - 1))
+        sum += (z * (Ks[i] - 1)) / (1 + V_frac * (Ks[i] - 1))
     return sum
 
 
-def rachford_funtion_first_derivative(zs: list[float], ks: list[float], V_F: float):
+def RR_equation_first_derivative(zs: list[float], Ks: list[float], V_frac: float):
+    """
+    Evaluates the first derivative of the Rachford Rice equation
+    zs, overall mole fractions
+    Ks, vapour liquid equilibrium constants
+    V_Frac, vapour fraction
+    """
     sum = 0
     for i, z in enumerate(zs):
-        sum += (-z * (ks[i] - 1) ** 2) / (1 + V_F * (ks[i] - 1) ** 2)
+        sum += (-z * (Ks[i] - 1) ** 2) / (1 + V_frac * (Ks[i] - 1) ** 2)
     return sum
 
 
-def rachford_rice_flash(
-    zs: list[float], ks: list[float]
-) -> tuple([float, list[float], list[float], int]):
+def RR_flash(
+    zs: dict[str, float], Ks: dict[str, float]
+) -> tuple([float, dict[str, float], dict[str, float], int]):
     """
     2 phase isothermal rachford_rice, using newtons method for now
-    zs: list[float], overall mole fractions
-    ks: list[float], k values of components\n
+    zs, overall mole fractions
+    Ks, vapour liquid equilibrium constants\n
     returns:
-    float: V_frac
-    list:[float] xs liquid mole fractions
-    list: [float] ys vapor mole fractions
-    int: solve status: 0 = solved, 1 = iterations exceeded
+    V_frac: vapour fraction
+    xs, liquid mole fractions
+    ys, vapor mole fractions
+    solve status, 0 = solved, 1 = iterations exceeded
     """
-
-    # print(chem.rachford_rice.Rachford_Rice_solution(zs, ks))
-
-    kmax = max(ks)
-    kmin = min(ks)
+    comps = zs.keys()
+    zs_list = []
+    Ks_list = []
+    for comp in comps:
+        zs_list.append(zs[comp])
+        Ks_list.append(Ks[comp])
+    # print(chem.rachford_rice.Rachford_Rice_solution(zs_list, Ks_list))
+    Kmax = max(Ks_list)
+    Kmin = min(Ks_list)
 
     # guess for V/F
     V_frac = (
-        ((kmax - kmin) * zs[ks.index(kmax)] - (1 - kmin)) / ((1 - kmin) * (kmax - 1))
-        + (1 / (1 - kmin))
+        ((Kmax - Kmin) * zs_list[Ks_list.index(Kmax)] - (1 - Kmin))
+        / ((1 - Kmin) * (Kmax - 1))
+        + (1 / (1 - Kmin))
     ) / 2
 
     if V_frac > 1:
-        guess = 1
+        V_frac = 1
 
     solved = False
     iterations = 0
     while solved == False:
         iterations += 1
-        x = rachford_function(zs, ks, V_frac)
-        x_prime = rachford_funtion_first_derivative(zs, ks, V_frac)
+        x = RR_equation(zs_list, Ks_list, V_frac)
+        x_prime = RR_equation_first_derivative(zs_list, Ks_list, V_frac)
         new_V_frac = V_frac - x / x_prime
         V_frac = new_V_frac
         if iterations == 10000:
@@ -139,13 +161,13 @@ def rachford_rice_flash(
             solved = True
             status = 0
 
-    xs = []
-    ys = []
+    xs = {}
+    ys = {}
 
-    for i, z in enumerate(zs):
-        xs.append(z / (1 + (ks[i] - 1) * V_frac))
-        ys.append(ks[i] * z / (1 + (ks[i] - 1) * V_frac))
-    print(V_frac, xs, ys, status)
+    for comp in comps:
+        xs[comp] = zs[comp] / (1 + (Ks[comp] - 1) * V_frac)
+        ys[comp] = Ks[comp] * zs[comp] / (1 + (Ks[comp] - 1) * V_frac)
+    return (V_frac, xs, ys, status)
 
 
 class Flowsheet:
@@ -188,28 +210,6 @@ class Stream:
         self.generate_stream_properties()
         self.warnings = []
 
-        # Check if more than 1 component
-        if len(self.overall_composition) == 1:
-            if self.V_frac == None:
-                ((component, v),) = self.overall_composition.items()
-                P_vap = antoine_equation(component, T=self.T)
-                if P_vap <= self.P:
-                    # liquid phase assumed when P_vap = P for now as well
-                    self.V_frac = 0
-                elif P_vap > self.P:
-                    # vapour phase
-                    self.V_frac = 1
-        else:
-            if self.V_frac == None:
-
-                pass
-                # for component in self.overall_composition():
-
-                # if the minimum vapour pressure for the components is above Tb
-                # if antoine_equation("P",component,P=self.P):
-
-                # self.multi_component_flash()
-
     def check_stream_definition(self):
         """Checks if the stream as defined is valid"""
 
@@ -229,7 +229,6 @@ class Stream:
             if self.overall_composition == None:
                 self.overall_composition = {}
                 for component in self.overall_flows.keys():
-                    print(component)
                     self.overall_composition[component] = (
                         self.overall_flows[component] / self.total_flow_rate
                     )
@@ -263,39 +262,57 @@ class Stream:
         self.stream_properties = {}
         self.stream_properties["MW"] = calc_mol_weight(self.overall_composition)
         # K value model selection needs to be refined
-        self.stream_properties["V_L_Ks"] = {}
 
-        # if self.V_frac == None:
-        #     gen_K_values()
+        if self.V_frac == None:
+            self.stream_properties["V_L_Ks"] = gen_K_values(
+                P=self.P, T=self.T, comps=self.overall_composition
+            )
 
-    # def multi_component_flash(self):
-
-    #     ks = []
-    #     zs = []
-    #     for component in self.overall_composition.keys():
-    #         pvap = antoine_equation("P", component, T=self.T)
-    #         ks.append()
-    #         zs.append(self.overall_composition[component])
-
-    #     rachford_rice_flash(zs, ks)
+        # Check if more than 1 component
+        if len(self.overall_composition) == 1:
+            if self.V_frac == None:
+                ((component, v),) = self.overall_composition.items()
+                P_vap = antoine_equation(component, T=self.T)
+                if P_vap <= self.P:
+                    # liquid phase assumed when P_vap = P for now as well
+                    self.V_frac = 0
+                elif P_vap > self.P:
+                    # vapour phase
+                    self.V_frac = 1
+        # multiple components
+        else:
+            if self.V_frac == None:
+                if all(list(self.stream_properties["V_L_Ks"].values())) < 1.0:
+                    self.V_frac == 0
+                elif all(list(self.stream_properties["V_L_Ks"].values())) > 1.0:
+                    self.V_frac == 1
+                else:
+                    (
+                        self.V_frac,
+                        self.stream_properties["xs"],
+                        self.stream_properties["ys"],
+                        Flash_status,
+                    ) = RR_flash(
+                        self.overall_composition, self.stream_properties["V_L_Ks"]
+                    )
 
 
 flowsheet_1 = Flowsheet("flowsheet_1")
 stream_1 = Stream(
     "stream_1",
-    T=373,
+    T=360,
     P=101325,
     total_flow_rate=1.0,
     overall_composition={"water": 1.0},
 )
 
 stream_2 = Stream(
-    "stream_2", T=373.15, P=101325, overall_flows={"Water": 0.4, "ethanol": 0.6}
+    "stream_2", T=360, P=101325, overall_flows={"Water": 0.4, "ethanol": 0.6}
 )
 
 flowsheet_1.add_stream(stream_1)
 flowsheet_1.add_stream(stream_2)
-print(flowsheet_1.streams_list["stream_1"])
+# print(flowsheet_1.streams_list["stream_1"])
 print(flowsheet_1.streams_list["stream_2"])
 
 # rachford_rice_flash([0.5, 0.3, 0.2], [1.685, 0.742, 0.532])
