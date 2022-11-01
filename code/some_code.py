@@ -41,7 +41,9 @@ def ideal_gas_solver(P: float = None, T: float = None, V_bar: float = None) -> f
         raise Exception("you didnt specify P, T or V_bar, provide 2")
 
 
-def antoine_equation(comp: str, P_vap: float = None, T: float = None) -> float:
+def antoine_equation(
+    comp: str, P_vap: float = None, T: float = None, warnings=[]
+) -> float:
     """
     Determine the vapour pressure or temperature from the antoine equation using base 10 for the exponential and logarithm\n
     comp, component
@@ -57,14 +59,14 @@ def antoine_equation(comp: str, P_vap: float = None, T: float = None) -> float:
 
     if P_vap == None:
         if T < ant_data["Tmin"] or T > ant_data["Tmax"]:
-            print(
+            warnings.append(
                 f"Warning: out of T correlation range for component {comp} {ant_data['Tmin']} < T < {ant_data['Tmax']}"
             )
         return 10 ** (A - B / (T + C))
     elif T == None:
         T = -(C + B / (math.log(P_vap, 10) - A))
         if T < ant_data["Tmin"] or T > ant_data["Tmax"]:
-            print(
+            warnings.append(
                 f"Warning: out of T correlation range for component {comp} {ant_data['Tmin']} < T < {ant_data['Tmax']}"
             )
         return T
@@ -72,7 +74,9 @@ def antoine_equation(comp: str, P_vap: float = None, T: float = None) -> float:
         raise Exception("You didnt specifiy T or P_vap")
 
 
-def gen_K_values(P: float, T: float, comps: dict[str, float]) -> dict[str, float]:
+def gen_K_values(
+    P: float, T: float, comps: dict[str, float], warnings=[]
+) -> dict[str, float]:
     """
     Determines the K_values of the components at given pressure and temperature, only Raoult's law at the moment\n
     P, total pressure in Pa\n
@@ -82,7 +86,7 @@ def gen_K_values(P: float, T: float, comps: dict[str, float]) -> dict[str, float
     result = {}
     K_value = None
     for component in comps.keys():
-        P_vap = antoine_equation(comp=component, T=T)
+        P_vap = antoine_equation(comp=component, T=T, warnings=warnings)
         result[component] = P_vap / P
     return result
 
@@ -114,7 +118,7 @@ def RR_equation_first_derivative(zs: list[float], Ks: list[float], V_frac: float
 
 
 def RR_flash(
-    zs: dict[str, float], Ks: dict[str, float]
+    zs: dict[str, float], Ks: dict[str, float], warnings=[]
 ) -> tuple([float, dict[str, float], dict[str, float], int]):
     """
     2 phase isothermal rachford_rice, using newtons method for now
@@ -167,7 +171,135 @@ def RR_flash(
     for comp in comps:
         xs[comp] = zs[comp] / (1 + (Ks[comp] - 1) * V_frac)
         ys[comp] = Ks[comp] * zs[comp] / (1 + (Ks[comp] - 1) * V_frac)
+
+    if V_frac < 0:
+        V_frac = 0
+        warnings.append(
+            "V_frac calculated is less than 0, set to 0 , check calculation inputs"
+        )
+    elif V_frac > 1:
+        V_frac = 1
+        warnings.append(
+            "V_frac calculated is greater than 1, set to 1 , check calculation inputs"
+        )
+
     return (V_frac, xs, ys, status)
+
+
+def check_stream_definition(stream):
+    """Checks if the stream as defined is valid"""
+
+    # make sure that enough data exists about the stream flows and composition
+    if stream.overall_flows == None and (
+        stream.overall_composition == None or stream.total_flow_rate == None
+    ):
+        raise Exception(
+            "Not enough information, either provide overall_flows or both of overall_composition and total_flow_rate"
+        )
+
+    # In the case where the total flow rate is missing
+    # but the overall flows are available
+    if stream.total_flow_rate == None:
+        if stream.overall_flows != None:
+            stream.total_flow_rate = sum(stream.overall_flows.values())
+
+    # Case where total_flow_rate and/or overall_flows were given but not the overall composition
+    if stream.overall_composition == None:
+        stream.overall_composition = {}
+        if sum(stream.overall_flows.values()) != stream.total_flow_rate:
+            raise Exception("overall_flows must sum to total_flow_rate")
+        for component in stream.overall_flows.keys():
+            stream.overall_composition[component] = (
+                stream.overall_flows[component] / stream.total_flow_rate
+            )
+    # Case where total_flow_rate and overall composition were given but not overall_flows
+    elif stream.overall_flows == None:
+        stream.overall_flows = {}
+        for component in stream.overall_composition.keys():
+            stream.overall_flows[component] = (
+                stream.total_flow_rate * stream.overall_composition[component]
+            )
+
+    # Check the composition sums to 1.0
+    if sum(stream.overall_composition.values()) != 1.0:
+        raise Exception("Overall composition must sum to 1")
+
+    # Check the overall_flows match the overall composition
+    for component in stream.overall_flows.keys():
+        if (
+            stream.overall_composition[component]
+            != stream.overall_flows[component] / stream.total_flow_rate
+        ):
+            raise Exception(
+                f"Composition does not match flow rate for component {component}"
+            )
+
+    # Check if all components have data in the chem module
+    for component in stream.overall_composition.keys():
+        try:
+            chem.CAS_from_any(component)
+        except ValueError:
+            raise Exception(f"{component} is not a valid component, try again")
+
+    if (
+        stream.T == None
+        and (stream.P == None or stream.V_frac == None)
+        or (stream.P == None and stream.V_frac == None)
+    ):
+        raise Exception(
+            "Not enough information, provide two of temperature, pressure and Vapour fraction"
+        )
+
+    if stream.V_frac is not None:
+        if stream.V_frac < 0.0 or stream.V_frac > 1.0:
+            raise Exception("Vapour_fraction must be between 0 and 1")
+
+
+def generate_stream_properties(stream):
+    stream.stream_properties = {}
+    stream.stream_properties["MW"] = calc_mol_weight(stream.overall_composition)
+    # K value model selection needs to be refined
+    # So far this only solved if P and T are specified Vfrac and T and Vfrac and P solvers need to be implemented
+
+    if stream.V_frac == None:
+        stream.stream_properties["V_L_Ks"] = gen_K_values(
+            P=stream.P,
+            T=stream.T,
+            comps=stream.overall_composition,
+            warnings=stream.warnings,
+        )
+        # Check if more than 1 component
+        if len(stream.overall_composition) == 1:
+            if stream.V_frac == None:
+                ((component, v),) = stream.overall_composition.items()
+                P_vap = antoine_equation(
+                    component, T=stream.T, warnings=stream.warnings
+                )
+                if P_vap <= stream.P:
+                    # liquid phase assumed when P_vap = P for now as well
+                    stream.V_frac = 0
+                elif P_vap > stream.P:
+                    # vapour phase
+                    stream.V_frac = 1
+        # multiple components
+        else:
+            if all(list(stream.stream_properties["V_L_Ks"].values())) < 1.0:
+                stream.V_frac == 0
+            elif all(list(stream.stream_properties["V_L_Ks"].values())) > 1.0:
+                stream.V_frac == 1
+            else:
+                (
+                    stream.V_frac,
+                    stream.stream_properties["xs"],
+                    stream.stream_properties["ys"],
+                    Flash_status,
+                ) = RR_flash(
+                    stream.overall_composition,
+                    stream.stream_properties["V_L_Ks"],
+                    warnings=stream.warnings,
+                )
+                if Flash_status == 1:
+                    stream.warnings.append("Rachford Rice maximum iterations exceeded")
 
 
 class Flowsheet:
@@ -184,12 +316,19 @@ class Flowsheet:
         else:
             self.streams_list[stream.id] = stream
 
+    def solve(self):
+        for stream in self.streams_list.values():
+            if stream.is_inlet == True:
+                check_stream_definition(stream)
+                generate_stream_properties(stream)
+
 
 @dataclass
 class Stream:
     """Stream class for process flow streams"""
 
-    id: str
+    id: str  # Stream name
+    is_inlet: bool  # is the stream an inlet into the process
 
     # Specified properties  2 required (currently requires T and P as specifications)
     T: float = None  # temperature in K
@@ -202,117 +341,24 @@ class Stream:
     overall_flows: dict[str, float] = None  # mol/s
 
     stream_properties: dict[str, any] = None
-    warnings: list[str] = field(init=False)
-
-    def __post_init__(self):
-
-        self.check_stream_definition()
-        self.generate_stream_properties()
-        self.warnings = []
-
-    def check_stream_definition(self):
-        """Checks if the stream as defined is valid"""
-
-        # fill out the overall flows , composition and total flow rate
-        if self.overall_flows == None and (
-            self.overall_composition == None or self.total_flow_rate == None
-        ):
-            raise Exception(
-                "Not enough information, either provide overall_flows or both of overall_composition and total_flow_rate"
-            )
-
-        if self.overall_flows != None:
-
-            if self.total_flow_rate == None:
-                self.total_flow_rate = sum(self.overall_flows.values())
-
-            if self.overall_composition == None:
-                self.overall_composition = {}
-                for component in self.overall_flows.keys():
-                    self.overall_composition[component] = (
-                        self.overall_flows[component] / self.total_flow_rate
-                    )
-        else:
-            self.overall_flows = {}
-            for component in self.overall_composition.keys():
-                self.overall_flows[component] = (
-                    self.total_flow_rate * self.overall_composition[component]
-                )
-
-        for component in self.overall_composition.keys():
-            try:
-                chem.CAS_from_any(component)
-            except ValueError:
-                raise Exception(f"{component} is not a valid component, try again")
-
-        if (
-            self.T == None
-            and (self.P == None or self.V_frac == None)
-            or (self.P == None and self.V_frac == None)
-        ):
-            raise Exception(
-                "Not enough information, provide two of temperature, pressure and Vapour fraction"
-            )
-
-        if self.V_frac is not None:
-            if self.V_frac < 0.0 or self.V_frac > 1.0:
-                raise Exception("Vapour_fraction must be between 0 and 1")
-
-    def generate_stream_properties(self):
-        self.stream_properties = {}
-        self.stream_properties["MW"] = calc_mol_weight(self.overall_composition)
-        # K value model selection needs to be refined
-
-        if self.V_frac == None:
-            self.stream_properties["V_L_Ks"] = gen_K_values(
-                P=self.P, T=self.T, comps=self.overall_composition
-            )
-
-        # Check if more than 1 component
-        if len(self.overall_composition) == 1:
-            if self.V_frac == None:
-                ((component, v),) = self.overall_composition.items()
-                P_vap = antoine_equation(component, T=self.T)
-                if P_vap <= self.P:
-                    # liquid phase assumed when P_vap = P for now as well
-                    self.V_frac = 0
-                elif P_vap > self.P:
-                    # vapour phase
-                    self.V_frac = 1
-        # multiple components
-        else:
-            if self.V_frac == None:
-                if all(list(self.stream_properties["V_L_Ks"].values())) < 1.0:
-                    self.V_frac == 0
-                elif all(list(self.stream_properties["V_L_Ks"].values())) > 1.0:
-                    self.V_frac == 1
-                else:
-                    (
-                        self.V_frac,
-                        self.stream_properties["xs"],
-                        self.stream_properties["ys"],
-                        Flash_status,
-                    ) = RR_flash(
-                        self.overall_composition, self.stream_properties["V_L_Ks"]
-                    )
+    warnings: list = field(default_factory=lambda: [])
 
 
 flowsheet_1 = Flowsheet("flowsheet_1")
 stream_1 = Stream(
     "stream_1",
-    T=360,
+    True,
+    T=400,
     P=101325,
-    total_flow_rate=1.0,
-    overall_composition={"water": 1.0},
-)
-
-stream_2 = Stream(
-    "stream_2", T=360, P=101325, overall_flows={"Water": 0.4, "ethanol": 0.6}
+    # V_frac=2,
+    total_flow_rate=5.0,
+    overall_composition={"water": 0.4, "methanol": 0.6},
+    overall_flows={"water": 2.0, "methanol": 3.0},
 )
 
 flowsheet_1.add_stream(stream_1)
-flowsheet_1.add_stream(stream_2)
-# print(flowsheet_1.streams_list["stream_1"])
-print(flowsheet_1.streams_list["stream_2"])
+
+flowsheet_1.solve()
+print(flowsheet_1.streams_list["stream_1"])
 
 # rachford_rice_flash([0.5, 0.3, 0.2], [1.685, 0.742, 0.532])
